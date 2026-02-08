@@ -12,11 +12,13 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@supabase/supabase-js": "^2.95.3",
     "autocannon": "^8.0.0",
     "cpeak": "^2.5.0",
     "express": "^5.2.1",
     "fastify": "^5.7.1",
     "ioredis": "^5.9.2",
+    "kysely": "^0.28.11",
     "pg": "^8.17.1"
   }
 }

@@ -1,8 +1,16 @@
 import cpeak, { parseJSON } from "cpeak";
 import crypto from "crypto";
-import { DB } from "./database/index.js";
 import { redis } from "./database/redis.js";
 import { generateCode, getMaxId } from "./utils.js";
+import {
+  createCodeRawSql,
+  getRandomCodeV1RawSql,
+  getCodesCountRawSql,
+  getCodeByIdRawSql,
+  getMaxCodeIdRawSql,
+} from "./orm/raw-sql.js";
+import * as supabaseOrm from "./orm/supabase-sdk.js";
+import * as kyselyOrm from "./orm/kysely.js";
 
 const app = cpeak();
 
@@ -60,22 +68,16 @@ app.route("patch", `/update-something/:id/:name`, (req, res) => {
   });
 });
 
+// --- SQL (Raw) Routes ---
+
 // Inserts a simple record to the database
-app.route("post", "/code", async (req, res) => {
+app.route("post", "/sql/code", async (req, res) => {
   const code = generateCode();
 
   // Create a new code record
   try {
-    const result = await DB.query(
-      `
-      INSERT INTO codes (code)
-      VALUES ($1)
-      RETURNING id, code, created_at
-    `,
-      [code],
-    );
-
-    res.status(201).json({ created_code: result[0] });
+    const result = await createCodeRawSql(code);
+    res.status(201).json({ created_code: result });
   } catch (err) {
     if (err.code === "23505") {
       // Unique violation
@@ -87,27 +89,19 @@ app.route("post", "/code", async (req, res) => {
 });
 
 // Reads a simple random code from the database and returns it
-app.route("get", "/code-v1", async (req, res) => {
+app.route("get", "/sql/code-v1", async (req, res) => {
   // This is Big O(n) - Full Table Scan
-  const result = await DB.query(
-    `
-      SELECT id, code, created_at
-      FROM codes
-      ORDER BY RANDOM()
-      LIMIT 1
-    `,
-  );
+  const result = await getRandomCodeV1RawSql();
 
-  if (result.length === 0) {
+  if (!result) {
     return res.status(404).json({ error: "No codes found." });
   }
 
-  res.json({ data: result[0] });
+  res.json({ data: result });
 });
 
-app.route("get", "/code-v2", async (req, res) => {
-  const countResult = await DB.query(`SELECT COUNT(*) FROM codes`);
-  const count = parseInt(countResult[0].count, 10);
+app.route("get", "/sql/code-v2", async (req, res) => {
+  const count = await getCodesCountRawSql();
 
   if (count === 0) return res.status(404).json({ error: "No codes found." });
 
@@ -115,66 +109,135 @@ app.route("get", "/code-v2", async (req, res) => {
   const randomId = crypto.randomInt(1, count + 1);
 
   // Fetch the record by ID (Index Lookup)
-  const result = await DB.query(
-    `
-      SELECT id, code, created_at
-      FROM codes
-      WHERE id = $1
-    `,
-    [randomId],
-  );
+  const result = await getCodeByIdRawSql(randomId);
 
-  if (result.length === 0) {
+  if (!result) {
     return res.status(404).json({ error: "record not found" });
   }
 
-  res.json({ data: result[0] });
+  res.json({ data: result });
 });
 
-app.route("get", "/code-v3", async (req, res) => {
-  const maxResult = await DB.query(
-    `SELECT id FROM codes ORDER BY id DESC LIMIT 1`,
-  );
+app.route("get", "/sql/code-v3", async (req, res) => {
+  const maxId = await getMaxCodeIdRawSql();
 
-  if (maxResult.length === 0)
-    return res.status(404).json({ error: "No codes found." });
-
-  const maxId = maxResult[0].id;
+  if (maxId === null) return res.status(404).json({ error: "No codes found." });
 
   // Generate random ID up to Max
   const randomId = crypto.randomInt(1, maxId + 1);
 
   // Fetch (Index Lookup)
-  const result = await DB.query(
-    `SELECT id, code, created_at FROM codes WHERE id = $1`,
-    [randomId],
-  );
+  const result = await getCodeByIdRawSql(randomId);
 
-  if (result.length === 0) {
+  if (!result) {
     return res.status(404).json({ error: "record not found" });
   }
 
-  res.json({ data: result[0] });
+  res.json({ data: result });
 });
 
-app.route("get", "/code-v4", async (req, res) => {
+app.route("get", "/sql/code-v4", async (req, res) => {
   const randomId = crypto.randomInt(1, 10_000_000 + 1); // kinda like cheating
 
   // Fetch the record by ID (Index Lookup). This is Big O(1)
-  const result = await DB.query(
-    `
-      SELECT id, code, created_at
-      FROM codes
-      WHERE id = $1
-    `,
-    [randomId],
-  );
+  const result = await getCodeByIdRawSql(randomId);
 
-  if (result.length === 0) {
+  if (!result) {
+    // Changed from result.length === 0 to !result
     return res.status(404).json({ error: "record not found" });
   }
 
-  res.json({ data: result[0] });
+  res.json({ data: result }); // Changed from result[0] to result
+});
+
+// --- Supabase SDK Routes ---
+
+app.route("post", "/supabase/code", async (req, res) => {
+  const code = generateCode();
+  try {
+    const result = await supabaseOrm.createCodeSupabase(code);
+    res.status(201).json({ created_code: result });
+  } catch (err) {
+    if (err.code === "23505")
+      return res.status(409).json({ error: "Code already exists." });
+    throw err;
+  }
+});
+
+app.route("get", "/supabase/code-v1", async (req, res) => {
+  const result = await supabaseOrm.getRandomCodeV1Supabase();
+  if (!result) return res.status(404).json({ error: "No codes found." });
+  res.json({ data: result });
+});
+
+app.route("get", "/supabase/code-v2", async (req, res) => {
+  const count = await supabaseOrm.getCodesCountSupabase();
+  if (count === 0) return res.status(404).json({ error: "No codes found." });
+  const randomId = crypto.randomInt(1, count + 1);
+  const result = await supabaseOrm.getCodeByIdSupabase(randomId);
+  if (!result) return res.status(404).json({ error: "record not found" });
+  res.json({ data: result });
+});
+
+app.route("get", "/supabase/code-v3", async (req, res) => {
+  const maxId = await supabaseOrm.getMaxCodeIdSupabase();
+  if (maxId === null) return res.status(404).json({ error: "No codes found." });
+  const randomId = crypto.randomInt(1, maxId + 1);
+  const result = await supabaseOrm.getCodeByIdSupabase(randomId);
+  if (!result) return res.status(404).json({ error: "record not found" });
+  res.json({ data: result });
+});
+
+app.route("get", "/supabase/code-v4", async (req, res) => {
+  const randomId = crypto.randomInt(1, 10_000_000 + 1);
+  const result = await supabaseOrm.getCodeByIdSupabase(randomId);
+  if (!result) return res.status(404).json({ error: "record not found" });
+  res.json({ data: result });
+});
+
+// --- Kysely Routes ---
+
+app.route("post", "/kysely/code", async (req, res) => {
+  const code = generateCode();
+  try {
+    const result = await kyselyOrm.createCodeKysely(code);
+    res.status(201).json({ created_code: result });
+  } catch (err) {
+    if (err.code === "23505")
+      return res.status(409).json({ error: "Code already exists." });
+    throw err;
+  }
+});
+
+app.route("get", "/kysely/code-v1", async (req, res) => {
+  const result = await kyselyOrm.getRandomCodeV1Kysely();
+  if (!result) return res.status(404).json({ error: "No codes found." });
+  res.json({ data: result });
+});
+
+app.route("get", "/kysely/code-v2", async (req, res) => {
+  const count = await kyselyOrm.getCodesCountKysely();
+  if (count === 0) return res.status(404).json({ error: "No codes found." });
+  const randomId = crypto.randomInt(1, count + 1);
+  const result = await kyselyOrm.getCodeByIdKysely(randomId);
+  if (!result) return res.status(404).json({ error: "record not found" });
+  res.json({ data: result });
+});
+
+app.route("get", "/kysely/code-v3", async (req, res) => {
+  const maxId = await kyselyOrm.getMaxCodeIdKysely();
+  if (maxId === null) return res.status(404).json({ error: "No codes found." });
+  const randomId = crypto.randomInt(1, maxId + 1);
+  const result = await kyselyOrm.getCodeByIdKysely(randomId);
+  if (!result) return res.status(404).json({ error: "record not found" });
+  res.json({ data: result });
+});
+
+app.route("get", "/kysely/code-v4", async (req, res) => {
+  const randomId = crypto.randomInt(1, 10_000_000 + 1);
+  const result = await kyselyOrm.getCodeByIdKysely(randomId);
+  if (!result) return res.status(404).json({ error: "record not found" });
+  res.json({ data: result });
 });
 
 // Inserts a simple record to the database through Redis for super fast O(1) operations
@@ -209,31 +272,6 @@ app.route("post", "/code-fast", async (req, res) => {
 });
 
 app.route("post", "/code-ultra-fast", async (req, res) => {
-  /**
-   * We won't bother with id uniqueness here because at a rate of 1 million
-   * requests per second, it would take approximately 86,000 years to reach a 50%
-   * probability of at least one id duplicate.
-   *
-   *
-   * The math is based on the birthday paradox problem approximation:
-   * P(collision) ≈ 1 - e^(-n²/(2N))
-   *
-   * Where:
-   * n = number of UUIDs generated
-   * N = total possible UUIDs = 2^122
-   * e = Euler's number (≈ 2.71828)
-   *
-   * For 50% collision probability, we solve:
-   * 0.5 = 1 - e^(-n²/(2×2^122))
-   *
-   * This gives n ≈ 2.7×10^18 UUIDs. At 1 million UUIDs per second, this would take:
-   *
-   * Time (seconds) = n / 1,000,000 = 2.7×10^12 seconds
-   * Time (years) = 2.7×10^12 / (60×60×24×365) ≈ 86,000 years.
-   *
-   * Thus, for all practical purposes, we can consider UUID collisions negligible
-   * in this context.
-   */
   const id = crypto.randomUUID(); // generates a 122-bit random UUID
 
   const code = generateCode();
